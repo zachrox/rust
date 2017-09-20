@@ -45,72 +45,40 @@ impl Span {
 }
 
 // Tags
-const TAG_INLINE0: u32 = 0b00;
-const TAG_INLINE1: u32 = 0b01;
-const TAG_INLINE2: u32 = 0b10;
-const TAG_INTERNED: u32 = 0b11;
-const TAG_MASK: u32 = 0b11;
+const TAG_INLINE: u32 = 0;
+const TAG_INTERNED: u32 = 1;
+const TAG_MASK: u32 = 1;
 
 // Fields indexes
 const BASE_INDEX: usize = 0;
 const LEN_INDEX: usize = 1;
 const CTXT_INDEX: usize = 2;
 
-// Tag = 0b00, inline format 0.
+// Tag = 0, inline format.
 // -----------------------------------
-// | base 31:8  | len 7:2  | tag 1:0 |
+// | base 31:8  | len 7:1  | tag 0:0 |
 // -----------------------------------
-const INLINE0_SIZES: [u32; 3] = [24, 6, 0];
-const INLINE0_OFFSETS: [u32; 3] = [8, 2, 2];
+const INLINE_SIZES: [u32; 3] = [24, 7, 0];
+const INLINE_OFFSETS: [u32; 3] = [8, 1, 1];
 
-// Tag = 0b01, inline format 1.
-// -----------------------------------
-// | base 31:10 | len 9:2 | tag 1:0 |
-// -----------------------------------
-const INLINE1_SIZES: [u32; 3] = [22, 8, 0];
-const INLINE1_OFFSETS: [u32; 3] = [10, 2, 2];
-
-// Tag = 0b10, inline format 2.
-// ------------------------------------------------
-// | base 31:14 | len 13:13 | ctxt 12:2 | tag 1:0 |
-// ------------------------------------------------
-const INLINE2_SIZES: [u32; 3] = [18, 1, 11];
-const INLINE2_OFFSETS: [u32; 3] = [14, 13, 2];
-
-// Tag = 0b11, interned format.
+// Tag = 1, interned format.
 // ------------------------
-// | index 31:3 | tag 1:0 |
+// | index 31:1 | tag 0:0 |
 // ------------------------
-const INTERNED_INDEX_SIZE: u32 = 30;
-const INTERNED_INDEX_OFFSET: u32 = 2;
+const INTERNED_INDEX_SIZE: u32 = 31;
+const INTERNED_INDEX_OFFSET: u32 = 1;
 
 fn encode(sd: &SpanData) -> Span {
     let (base, len, ctxt) = (sd.lo.0, sd.hi.0 - sd.lo.0, sd.ctxt.0);
 
-    // Can we fit the span data into this encoding?
-    let fits = |sizes: [u32; 3]| {
-        (base >> sizes[BASE_INDEX]) == 0 && (len >> sizes[LEN_INDEX]) == 0 &&
-        (ctxt >> sizes[CTXT_INDEX]) == 0
-    };
-    // Turn fields into a single `u32` value.
-    let compose = |offsets: [u32; 3], tag| {
-        (base << offsets[BASE_INDEX]) | (len << offsets[LEN_INDEX]) |
-        (ctxt << offsets[CTXT_INDEX]) | tag
-    };
-
-    let val = if fits(INLINE0_SIZES) {
-        compose(INLINE0_OFFSETS, TAG_INLINE0)
-    } else if fits(INLINE1_SIZES) {
-        compose(INLINE1_OFFSETS, TAG_INLINE1)
-    } else if fits(INLINE2_SIZES) {
-        compose(INLINE2_OFFSETS, TAG_INLINE2)
+    let val = if (base >> INLINE_SIZES[BASE_INDEX]) == 0 &&
+                 (len >> INLINE_SIZES[LEN_INDEX]) == 0 &&
+                 (ctxt >> INLINE_SIZES[CTXT_INDEX]) == 0 {
+        (base << INLINE_OFFSETS[BASE_INDEX]) | (len << INLINE_OFFSETS[LEN_INDEX]) |
+        (ctxt << INLINE_OFFSETS[CTXT_INDEX]) | TAG_INLINE
     } else {
         let index = with_span_interner(|interner| interner.intern(sd));
-        if (index >> INTERNED_INDEX_SIZE) == 0 {
-            (index << INTERNED_INDEX_OFFSET) | TAG_INTERNED
-        } else {
-            panic!("too many spans in a crate");
-        }
+        (index << INTERNED_INDEX_OFFSET) | TAG_INTERNED
     };
     Span(val)
 }
@@ -119,32 +87,18 @@ fn decode(span: Span) -> SpanData {
     let val = span.0;
 
     // Extract a field at position `pos` having size `size`.
-    let extract = |pos, size| {
+    let extract = |pos: u32, size: u32| {
         let mask = ((!0u32) as u64 >> (32 - size)) as u32; // Can't shift u32 by 32
         (val >> pos) & mask
     };
 
-    let (base, len, ctxt) = match val & TAG_MASK {
-        TAG_INLINE0 => (
-            extract(INLINE0_OFFSETS[BASE_INDEX], INLINE0_SIZES[BASE_INDEX]),
-            extract(INLINE0_OFFSETS[LEN_INDEX], INLINE0_SIZES[LEN_INDEX]),
-            extract(INLINE0_OFFSETS[CTXT_INDEX], INLINE0_SIZES[CTXT_INDEX]),
-        ),
-        TAG_INLINE1 => (
-            extract(INLINE1_OFFSETS[BASE_INDEX], INLINE1_SIZES[BASE_INDEX]),
-            extract(INLINE1_OFFSETS[LEN_INDEX], INLINE1_SIZES[LEN_INDEX]),
-            extract(INLINE1_OFFSETS[CTXT_INDEX], INLINE1_SIZES[CTXT_INDEX]),
-        ),
-        TAG_INLINE2 => (
-            extract(INLINE2_OFFSETS[BASE_INDEX], INLINE2_SIZES[BASE_INDEX]),
-            extract(INLINE2_OFFSETS[LEN_INDEX], INLINE2_SIZES[LEN_INDEX]),
-            extract(INLINE2_OFFSETS[CTXT_INDEX], INLINE2_SIZES[CTXT_INDEX]),
-        ),
-        TAG_INTERNED => {
-            let index = extract(INTERNED_INDEX_OFFSET, INTERNED_INDEX_SIZE);
-            return with_span_interner(|interner| *interner.get(index));
-        }
-        _ => unreachable!()
+    let (base, len, ctxt) = if val & TAG_MASK == TAG_INLINE {(
+        extract(INLINE_OFFSETS[BASE_INDEX], INLINE_SIZES[BASE_INDEX]),
+        extract(INLINE_OFFSETS[LEN_INDEX], INLINE_SIZES[LEN_INDEX]),
+        extract(INLINE_OFFSETS[CTXT_INDEX], INLINE_SIZES[CTXT_INDEX]),
+    )} else {
+        let index = extract(INTERNED_INDEX_OFFSET, INTERNED_INDEX_SIZE);
+        return with_span_interner(|interner| *interner.get(index));
     };
     SpanData { lo: BytePos(base), hi: BytePos(base + len), ctxt: SyntaxContext(ctxt) }
 }
